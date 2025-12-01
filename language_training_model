@@ -1,0 +1,228 @@
+(此程式碼由gemini生成，並且需要在colab使用，注意到第11行的位置，想要跑遍3個生成的數據需要手動調整數字)
+import torch
+import torch.nn as nn
+from torch.utils.data import TensorDataset, DataLoader
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+import pandas as pd
+import numpy as np
+
+# --- *** 請在這裡更改實驗 ID (1, 2, 或 3) *** ---
+CURRENT_EXP_ID = 1 # <--- 每次運行請修改這裡！
+# ----------------------------------------------
+
+# 檢查 CUDA
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"使用裝置: {device}")
+
+# --- 1. 數據讀取與預處理 ---
+
+if 'all_experiment_summaries' not in globals():
+    raise RuntimeError("請先運行數據生成 Cell！")
+
+# 獲取當前實驗的配置
+current_exp = next(item for item in all_experiment_summaries if item["Exp_ID"] == CURRENT_EXP_ID)
+OUTPUT_FILENAME = current_exp['Filename']
+TRUE_RULE = current_exp['True_Rule']
+TRIGGER_SUBJECT = current_exp['Inflection_Rule'].split("'")[1]
+INFLECTION_SUFFIX = current_exp['Inflection_Rule'].split("'")[3]
+
+
+print(f"--- 載入 [實驗 {CURRENT_EXP_ID}] ---")
+print(f"檔案: {OUTPUT_FILENAME}")
+print(f"真實語法規則: {TRUE_RULE}")
+print(f"詞形變化: '{TRIGGER_SUBJECT}' 觸發 V + '{INFLECTION_SUFFIX}'")
+print("-" * 30)
+
+# 讀取 CSV
+try:
+    df = pd.read_csv(OUTPUT_FILENAME)
+except Exception as e:
+    print(f"錯誤: 無法讀取 {OUTPUT_FILENAME}。請檢查檔案是否存在。")
+    raise e
+
+# 建立詞彙表 (Vocabulary)
+all_words = set()
+for sentence in df['Sentence_Text']:
+    all_words.update(sentence.split())
+VOCAB = sorted(list(all_words))
+word_to_idx = {word: idx + 1 for idx, word in enumerate(VOCAB)}
+word_to_idx['<PAD>'] = 0
+
+# 建立標籤表 (Label Map)
+LABEL_MAP = {'S': 1, 'V': 2, 'O': 3}
+idx_to_label = {v: k for k, v in LABEL_MAP.items()}
+idx_to_label[0] = '<PAD>'
+
+MAX_LEN = 3 
+
+X, Y = [], []
+for _, row in df.iterrows():
+    sentence = row['Sentence_Text'].split()
+    labels = row['True_Labels'].split()
+    
+    seq = [word_to_idx.get(word, 0) for word in sentence]
+    lab = [LABEL_MAP.get(label, 0) for label in labels] 
+    
+    # 填充 (Padding)
+    padding_len = MAX_LEN - len(seq)
+    seq_padded = seq + [word_to_idx['<PAD>']] * padding_len
+    lab_padded = lab + [0] * padding_len
+    
+    X.append(seq_padded)
+    Y.append(lab_padded)
+
+X = torch.LongTensor(np.array(X)).to(device)
+Y = torch.LongTensor(np.array(Y)).to(device)
+VOCAB_SIZE = len(word_to_idx)
+LABEL_SIZE = len(LABEL_MAP) + 1 
+
+
+# --- 2. 模型設計：簡易 Transformer Encoder ---
+
+class SimpleTransformerTagger(nn.Module):
+    def __init__(self, vocab_size, label_size, max_len, embed_dim=32, num_heads=2, num_layers=1):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        self.positional_encoding = nn.Parameter(torch.zeros(1, max_len, embed_dim))
+        
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim, nhead=num_heads, dim_feedforward=64, dropout=0.1, batch_first=True
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.fc_out = nn.Linear(embed_dim, label_size)
+
+    def forward(self, x):
+        x = self.embedding(x)
+        x = x + self.positional_encoding
+        src_key_padding_mask = (x.sum(dim=2) == 0)
+        h = self.transformer_encoder(x, src_key_padding_mask=src_key_padding_mask)
+        logits = self.fc_out(h) 
+        return logits
+
+# --- 3. 訓練設定與循環 (與先前版本相同) ---
+
+X_train, X_val, Y_train, Y_val = train_test_split(X.cpu(), Y.cpu(), test_size=0.2, random_state=42)
+train_data = TensorDataset(X_train.to(device), Y_train.to(device))
+val_data = TensorDataset(X_val.to(device), Y_val.to(device))
+
+train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
+val_loader = DataLoader(val_data, batch_size=32)
+
+model = SimpleTransformerTagger(VOCAB_SIZE, LABEL_SIZE, MAX_LEN).to(device)
+
+criterion = nn.CrossEntropyLoss(ignore_index=0)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+NUM_EPOCHS = 50
+train_losses = []
+
+print("\n--- 模型訓練開始 (Transformer Tagger) ---")
+model.train()
+for epoch in range(NUM_EPOCHS):
+    total_loss = 0
+    for inputs, labels in train_loader:
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        
+        outputs_flat = outputs.view(-1, LABEL_SIZE)
+        labels_flat = labels.view(-1)
+        
+        loss = criterion(outputs_flat, labels_flat)
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+        
+    avg_loss = total_loss / len(train_loader)
+    train_losses.append(avg_loss)
+    
+    if (epoch + 1) % 10 == 0:
+        print(f"Epoch [{epoch+1}/{NUM_EPOCHS}], Loss: {avg_loss:.4f}")
+
+# --- 4. 結果評估與展示 ---
+
+def evaluate_model(model, data_loader):
+    # ... (函數內容與先前版本相同，用於計算準確率)
+    model.eval()
+    correct_predictions = 0
+    total_predictions = 0
+    
+    with torch.no_grad():
+        for inputs, labels in data_loader:
+            outputs = model(inputs)
+            _, predicted = torch.max(outputs.data, 2)
+            
+            mask = (labels != 0)
+            correct_predictions += (predicted[mask] == labels[mask]).sum().item()
+            total_predictions += mask.sum().item()
+            
+    accuracy = correct_predictions / total_predictions
+    return accuracy
+
+train_accuracy = evaluate_model(model, train_loader)
+val_accuracy = evaluate_model(model, val_loader)
+
+print("\n--- 訓練結果 ---")
+print(f"訓練準確率 (Token Accuracy): {train_accuracy:.4f}")
+print(f"驗證準確率 (Token Accuracy): {val_accuracy:.4f}")
+
+# 繪製 Loss 曲線
+plt.figure(figsize=(8, 4))
+plt.plot(train_losses, label='Training Loss')
+plt.title(f'Training Loss Curve (Experiment {CURRENT_EXP_ID}: Rule {TRUE_RULE})')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# 預測範例
+def predict_sentence(model, sentence_indices, word_to_idx, idx_to_label):
+    # ... (函數內容與先前版本相同，用於預測)
+    model.eval()
+    input_tensor = torch.LongTensor([sentence_indices]).to(device)
+    
+    with torch.no_grad():
+        outputs = model(input_tensor)
+        _, predicted = torch.max(outputs.data, 2)
+        
+    predictions = [idx_to_label[idx.item()] for idx in predicted[0]]
+    
+    idx_to_word = {v: k for k, v in word_to_idx.items()}
+    words = [idx_to_word[idx.item()] for idx in input_tensor[0]]
+    
+    actual_len = (input_tensor[0] != 0).sum().item()
+    
+    return words[:actual_len], predictions[:actual_len]
+
+print("\n--- 預測範例分析 ---")
+print(f"真實語法規則: {TRUE_RULE}")
+print(f"詞形變化: '{TRIGGER_SUBJECT}' 觸發 V + '{INFLECTION_SUFFIX}'")
+print("-" * 30)
+
+sample_indices = random.choices(range(len(X_val)), k=3) 
+
+for i in sample_indices:
+    input_indices = X_val[i].tolist()
+    true_labels_indices = Y_val[i].tolist()
+    
+    words, predicted_labels = predict_sentence(model, input_indices, word_to_idx, idx_to_label)
+    
+    true_labels = [idx_to_label[idx] for idx in true_labels_indices if idx != 0]
+
+    print(f"輸入句子: {' '.join(words)}")
+    print(f"真實標籤: {true_labels}")
+    print(f"模型預測: {predicted_labels}")
+    
+    is_inflected = False
+    if TRIGGER_SUBJECT in words:
+        for word in words:
+            if word.endswith(INFLECTION_SUFFIX):
+                is_inflected = True
+                break
+    
+    if is_inflected:
+        print("  * 包含遠距離依存的詞形變化 (V 詞尾有變形)")
+    
+    print("-" * 30)
