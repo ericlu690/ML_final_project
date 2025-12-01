@@ -1,1 +1,4 @@
 這是機器學習的期末project
+report顯示的是總報告內容
+若要使用程式碼來跑成果，注意使用colab運行
+先跑generate_data再跑training_model
