@@ -1,0 +1,134 @@
+(此程式碼由google gemini生成，並且需要在colab上執行，因為它會建立3個資料集供另一個模型來使用)
+import numpy as np
+import random
+from collections import defaultdict
+import pandas as pd
+import csv
+
+# --- 1. 核心參數設定 ---
+CONSONANTS = "bdfgklmnprstvz"
+VOWELS = "aeiou"
+INFLECTIONS = ["ay", "ish", "or", "ul"]
+POSSIBLE_RULES = ['SVO', 'SOV', 'VSO', 'VOS', 'OSV', 'OVS']
+NUM_SENTENCES = 500  # 訓練數據量
+OMIT_S_PROB = 0.2    # 20% 機率省略主詞
+NUM_EXPERIMENTS = 3 # 運行 3 組獨立實驗
+
+# --- 2. 隨機詞彙與數據生成函數 (移除固定種子) ---
+
+def generate_random_word(min_len=2, max_len=3):
+    """生成隨機子音+母音的亂數字彙"""
+    length = random.randint(min_len, max_len)
+    word = ""
+    start_with_c = random.choice([True, False])
+    for i in range(length):
+        if i % 2 == 0:
+            word += random.choice(CONSONANTS) if start_with_c else random.choice(VOWELS)
+        else:
+            word += random.choice(VOWELS) if start_with_c else random.choice(CONSONANTS)
+    return word
+
+def generate_lexicon(size=3):
+    """生成一組隨機詞彙，確保不重覆"""
+    lexicon = set()
+    while len(lexicon) < size:
+        lexicon.add(generate_random_word())
+    return list(lexicon)
+
+def generate_unknown_language_data(num_sentences, omit_s_prob, true_rule, 
+                                   subjects, verbs, objects, trigger_subject, inflection_suffix):
+    
+    data_records = []
+    
+    for _ in range(num_sentences):
+        s_word_base = random.choice(subjects)
+        v_word_base = random.choice(verbs)
+        o_word_base = random.choice(objects)
+        
+        # 應用詞形變化
+        v_word_final = v_word_base
+        is_inflected = False
+        if s_word_base == trigger_subject:
+            v_word_final = v_word_base + inflection_suffix
+            is_inflected = True
+        
+        sentence_parts = {
+            'S': (s_word_base, 'S'), 
+            'V': (v_word_final, 'V'),
+            'O': (o_word_base, 'O')
+        }
+        
+        omit_s = random.random() < omit_s_prob
+        current_sentence = []
+        current_labels = []
+        
+        for role_char in true_rule:
+            if role_char == 'S' and omit_s:
+                continue
+            
+            word, label = sentence_parts[role_char]
+            current_sentence.append(word)
+            current_labels.append(label)
+        
+        # 結構化記錄
+        record = {
+            'Sentence_Text': ' '.join(current_sentence),
+            'True_Labels': ' '.join(current_labels), # S, V, O 標籤
+            'Is_Inflected': is_inflected,
+            'Original_S': s_word_base,
+            'Original_V': v_word_base,
+            'Original_O': o_word_base,
+            'Actual_V_Form': v_word_final
+        }
+        data_records.append(record)
+        
+    return data_records
+
+# --- 3. 執行生成並輸出 CSV (3 次獨立執行) ---
+
+experiment_summaries = []
+
+for i in range(1, NUM_EXPERIMENTS + 1):
+    # 每次實驗都生成一套全新的、隨機的參數
+    SUBJECTS = generate_lexicon(3)
+    VERBS = generate_lexicon(3)
+    OBJECTS = generate_lexicon(3)
+    
+    TRIGGER_SUBJECT = random.choice(SUBJECTS)
+    INFLECTION_SUFFIX = random.choice(INFLECTIONS)
+    TRUE_RULE = random.choice(POSSIBLE_RULES)
+    
+    # 執行數據生成
+    data_records = generate_unknown_language_data(
+        NUM_SENTENCES, OMIT_S_PROB, TRUE_RULE, 
+        SUBJECTS, VERBS, OBJECTS, TRIGGER_SUBJECT, INFLECTION_SUFFIX
+    )
+
+    df = pd.DataFrame(data_records)
+    output_filename = f'unknown_language_data_Exp{i}.csv'
+    df.to_csv(output_filename, index=False, encoding='utf-8')
+    
+    summary = {
+        'Exp_ID': i,
+        'Filename': output_filename,
+        'True_Rule': TRUE_RULE,
+        'Inflection_Rule': f"'{TRIGGER_SUBJECT}' 觸發 V + '{INFLECTION_SUFFIX}'",
+        'Subjects': SUBJECTS,
+        'Verbs': VERBS,
+        'Objects': OBJECTS
+    }
+    experiment_summaries.append(summary)
+
+# --- 4. 總結報告 ---
+print("--- 數據生成報告：3 組獨立實驗 ---")
+for summary in experiment_summaries:
+    print(f"\n**[實驗 {summary['Exp_ID']}] 檔案: {summary['Filename']}**")
+    print(f"  真實語法規則: {summary['True_Rule']}")
+    print(f"  詞形變化規則: {summary['Inflection_Rule']}")
+    print(f"  S 詞彙: {summary['Subjects']}")
+
+print(f"\n已生成 {NUM_EXPERIMENTS} 個獨立的 CSV 檔案。")
+
+# 設置全域變數，以便在下一個 Cell 中使用這些配置
+global all_experiment_summaries
+all_experiment_summaries = experiment_summaries
